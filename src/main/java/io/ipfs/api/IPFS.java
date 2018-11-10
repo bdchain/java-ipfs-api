@@ -19,6 +19,8 @@ public class IPFS {
     public List<String> ObjectTemplates = Arrays.asList("unixfs-dir");
     public List<String> ObjectPatchTypes = Arrays.asList("add-link", "rm-link", "set-data", "append-data");
 
+    private final static int DEFAULT_HTTP_TIMEOUT = 5000;
+    public static int httpTimeout = DEFAULT_HTTP_TIMEOUT;
     public final String host;
     public final int port;
     public final String protocol;
@@ -411,12 +413,138 @@ public class IPFS {
             return retrieveMap("dht/findprovs?arg=" + hash);
         }
 
+        public Map findprovs(Multihash hash, int maxPeers) throws IOException {
+            return retrieveMap("dht/findprovs?arg=" + hash + "&n=" + maxPeers);
+        }
+
+        public List findprovsList(Multihash hash) throws IOException {
+            return (List)retrieveAndParse("dht/findprovs?arg=" + hash);
+        }
+
+        public Stream<String> findprovsListStream(Multihash hash, int maxPeers) throws IOException {
+            ForkJoinPool pool = new ForkJoinPool();
+            Stream<Map> resStream = retrieveAndParseStream("dht/findprovs?arg=" + hash + "&n=" + maxPeers, pool).map(obj -> (Map)obj);
+
+            return resStream
+                    .filter(res -> (int)res.get("Type") == 4)
+                    .map(
+                        res -> (String)
+                            ((Map)
+                                ((ArrayList) res.get("Responses")
+                                ).get(0)
+                            ).get("ID")
+                    );
+        }
+
+        public List findprovsList(Multihash hash, int maxPeers) throws IOException {
+            Object res = retrieveAndParse("dht/findprovs?arg=" + hash + "&n=" + maxPeers);
+
+            List<Map> resList;
+            if(res instanceof Map) {
+                resList = new ArrayList<>();
+                resList.add((Map) res);
+            }else{
+                resList = (List<Map>)res;
+            }
+
+            List<String> ret = new ArrayList<>();
+            for ( Map response : resList) {
+              if ((int)response.get("Type") == 4) { //see https://github.com/libp2p/go-libp2p-routing/blob/c568217bd16dbdb16aaa3064f5d1f2dfa224b589/notifications/query.go#L17
+                String id = (String)
+                    ((Map)
+                        ((ArrayList) response.get("Responses")
+                        ).get(0)
+                    ).get("ID");
+                  ret.add(id);
+              }
+            }
+            return ret;
+
+        }
+
         public Map query(Multihash peerId) throws IOException {
             return retrieveMap("dht/query?arg=" + peerId.toString());
         }
 
         public Map findpeer(Multihash id) throws IOException {
             return retrieveMap("dht/findpeer?arg=" + id.toString());
+        }
+
+        public Stream<String> findpeerListStream(Multihash id) throws IOException {
+            ForkJoinPool pool = new ForkJoinPool();
+            Stream<Map> resStream = retrieveAndParseStream("dht/findpeer?arg=" + id, pool).map(obj -> (Map) obj);
+            return resStream
+                    .filter(res -> (int)res.get("Type") == 2)
+                    .map(
+                        res -> (String)
+                                ((Map)
+                                    ((ArrayList) res.get("Responses")
+                                    ).get(0)
+                                ).get("Addrs")
+                    );
+        }
+
+        public List<String> findpeerListTimeout(Multihash id, int timeout) throws IOException {
+            List<String> ret = Collections.emptyList();
+            FutureTask<List<String>> task = new FutureTask<>(
+                    new Callable<List<String>>() {
+                        @Override
+                        public List<String> call() throws Exception {
+                            ForkJoinPool pool = new ForkJoinPool();
+                            Stream<Map> resStream = retrieveAndParseStream("dht/findpeer?arg=" + id, pool).map(obj -> (Map) obj);
+                            return resStream
+                                    .filter(res -> (int)res.get("Type") == 2)
+                                    .map(
+                                            res -> (String)
+                                                    ((Map)
+                                                            ((ArrayList) res.get("Responses")
+                                                            ).get(0)
+                                                    ).get("Addrs")
+                                    )
+                                    .limit(1)
+                                    .collect(Collectors.toList());
+                        }
+                    }
+            );
+            ExecutorService executorService = Executors.newSingleThreadExecutor();
+            executorService.execute(task);
+            try {
+                ret = task.get(timeout, TimeUnit.MILLISECONDS);
+
+            } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                task.cancel(true);
+                ret = Collections.emptyList();
+            }
+
+            return ret;
+
+        }
+
+        public List<String> findpeerList(Multihash id) throws IOException {
+            Object res = retrieveAndParse("dht/findpeer?arg=" + id);
+            List<Map> resList;
+            if(res instanceof Map) {
+                resList = new ArrayList<>();
+                resList.add((Map) res);
+            }else{
+                resList = (List<Map>)res;
+            }
+
+            List<String> addrs = null;
+            for ( Map response : resList) {
+                if ((int)response.get("Type") == 2) { //see https://github.com/libp2p/go-libp2p-routing/blob/c568217bd16dbdb16aaa3064f5d1f2dfa224b589/notifications/query.go#L17
+                    addrs = (ArrayList<String>)
+                        ((Map)
+                            ((ArrayList) response.get("Responses")
+                            ).get(0)
+                        ).get("Addrs");
+                }
+            }
+
+            if(addrs != null)
+                return addrs;
+            else
+                throw new IOException("Unexpected response from IPFS: no peer addrs found.");
         }
 
         public Map get(Multihash hash) throws IOException {
@@ -615,6 +743,11 @@ public class IPFS {
 
     private Object retrieveAndParse(String path) throws IOException {
         byte[] res = retrieve(path);
+        String maybeJson = new String(res);
+        if (maybeJson.split("\n|\r\n").length > 1) {
+          return JSONParser.parse("[" + maybeJson + "]");
+        }
+
         return JSONParser.parse(new String(res));
     }
 
@@ -659,6 +792,7 @@ public class IPFS {
         HttpURLConnection conn = (HttpURLConnection) target.openConnection();
         conn.setRequestMethod("GET");
         conn.setRequestProperty("Content-Type", "application/json");
+        //conn.setReadTimeout(IPFS.httpTimeout);
 
         try {
             InputStream in = conn.getInputStream();
@@ -667,8 +801,10 @@ public class IPFS {
             byte[] buf = new byte[4096];
             int r;
             while ((r = in.read(buf)) >= 0)
-                resp.write(buf, 0, r);
+              resp.write(buf, 0, r);
             return resp.toByteArray();
+        } catch (SocketTimeoutException e) {
+            throw new RuntimeException("Socket read timed out: " + e);
         } catch (ConnectException e) {
             throw new RuntimeException("Couldn't connect to IPFS daemon at "+target+"\n Is IPFS running?");
         } catch (IOException e) {
@@ -706,6 +842,7 @@ public class IPFS {
         HttpURLConnection conn = (HttpURLConnection) target.openConnection();
         conn.setRequestMethod("GET");
         conn.setRequestProperty("Content-Type", "application/json");
+        conn.setReadTimeout(IPFS.httpTimeout);
         return conn.getInputStream();
     }
 
