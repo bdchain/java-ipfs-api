@@ -421,19 +421,54 @@ public class IPFS {
             return (List)retrieveAndParse("dht/findprovs?arg=" + hash);
         }
 
-        public Stream<String> findprovsListStream(Multihash hash, int maxPeers) throws IOException {
-            ForkJoinPool pool = new ForkJoinPool();
-            Stream<Map> resStream = retrieveAndParseStream("dht/findprovs?arg=" + hash + "&n=" + maxPeers, pool).map(obj -> (Map)obj);
+        public List<String> findprovsListTimeout(Multihash id, int maxPeers, int timeout) throws  IOException {
+            BlockingQueue<String> queue = new LinkedBlockingQueue<>();
+            Runnable task = new Runnable() {
+                @Override
+                public void run()  {
+                    try {
+                        String path = "dht/findprovs?arg=" + id + "&n=" + maxPeers;
+                        InputStream in = retrieveStream(path);
+                        getObjectSerial(in, queue);
 
-            return resStream
-                    .filter(res -> (int)res.get("Type") == 4)
-                    .map(
-                        res -> (String)
-                            ((Map)
-                                ((ArrayList) res.get("Responses")
-                                ).get(0)
-                            ).get("ID")
-                    );
+                    } catch (Exception e) {
+                        //
+                    }
+                }
+            };
+            ExecutorService executorService = Executors.newSingleThreadExecutor();
+            executorService.execute(task);
+
+            List<String> ret;
+            try {
+                ret = new ArrayList<>();
+                long stop = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(timeout);
+                while(System.currentTimeMillis() < stop && ret.size() < maxPeers) {
+                    String got = queue.poll(timeout, TimeUnit.SECONDS);
+                    if ( got != null ){
+                        Map peer = (Map) JSONParser.parse(got);
+                        if ( (int) peer.get("Type") == 4 ) {
+                            ret.add(
+                                (String)
+                                    ((Map)
+                                        ((ArrayList) peer.get("Responses")
+                                        ).get(0)
+                                    ).get("ID")
+                            );
+                        }
+                        //else: this is not a Peer ID response, so ignore it.
+                    }
+                    else {
+                        break;
+                    }
+                }
+
+            } catch (Exception e) {
+                ret = Collections.emptyList();
+            }
+
+            return ret;
+
         }
 
         public List findprovsList(Multihash hash, int maxPeers) throws IOException {
@@ -470,49 +505,47 @@ public class IPFS {
             return retrieveMap("dht/findpeer?arg=" + id.toString());
         }
 
-        public Stream<String> findpeerListStream(Multihash id) throws IOException {
-            ForkJoinPool pool = new ForkJoinPool();
-            Stream<Map> resStream = retrieveAndParseStream("dht/findpeer?arg=" + id, pool).map(obj -> (Map) obj);
-            return resStream
-                    .filter(res -> (int)res.get("Type") == 2)
-                    .map(
-                        res -> (String)
-                                ((Map)
-                                    ((ArrayList) res.get("Responses")
-                                    ).get(0)
-                                ).get("Addrs")
-                    );
-        }
-
         public List<String> findpeerListTimeout(Multihash id, int timeout) throws IOException {
-            List<String> ret = Collections.emptyList();
-            FutureTask<List<String>> task = new FutureTask<>(
-                    new Callable<List<String>>() {
-                        @Override
-                        public List<String> call() throws Exception {
-                            ForkJoinPool pool = new ForkJoinPool();
-                            Stream<Map> resStream = retrieveAndParseStream("dht/findpeer?arg=" + id, pool).map(obj -> (Map) obj);
-                            return resStream
-                                    .filter(res -> (int)res.get("Type") == 2)
-                                    .map(
-                                            res -> (String)
-                                                    ((Map)
-                                                            ((ArrayList) res.get("Responses")
-                                                            ).get(0)
-                                                    ).get("Addrs")
-                                    )
-                                    .limit(1)
-                                    .collect(Collectors.toList());
-                        }
+            BlockingQueue<String> queue = new LinkedBlockingQueue<>();
+            Runnable task = new Runnable() {
+                @Override
+                public void run()  {
+                    try {
+                        String path = "dht/findpeer?arg=" + id;
+                        InputStream in = retrieveStream(path);
+                        getObjectSerial(in, queue);
+
+                    } catch (Exception e) {
+                        //
                     }
-            );
+                }
+            };
             ExecutorService executorService = Executors.newSingleThreadExecutor();
             executorService.execute(task);
-            try {
-                ret = task.get(timeout, TimeUnit.MILLISECONDS);
 
-            } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                task.cancel(true);
+            List<String> ret = Collections.emptyList();
+            try {
+                long stop = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(timeout);
+                while(System.currentTimeMillis() < stop) {
+                    String got = queue.poll(timeout, TimeUnit.SECONDS);
+                    if ( got != null ){
+                        Map peer = (Map) JSONParser.parse(got);
+                        if ( (int) peer.get("Type") == 2 ) {
+                            ret = (ArrayList<String>)
+                                    ((Map)
+                                        ((ArrayList) peer.get("Responses")
+                                        ).get(0)
+                                    ).get("Addrs");
+                            break;
+                        }
+                        //else: response contains no Addrs, so ignore it.
+                    }
+                    else {
+                        break;
+                    }
+                }
+
+            } catch (Exception e) {
                 ret = Collections.emptyList();
             }
 
@@ -813,6 +846,24 @@ public class IPFS {
         }
     }
 
+    private void getObjectSerial(InputStream in, BlockingQueue<String> queue) throws IOException {
+        byte LINE_FEED = (byte) 10;
+        try {
+            ByteArrayOutputStream resp = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int r;
+            while ((r = in.read(buf)) >= 0) {
+                resp.write(buf, 0, r);
+                if (buf[r - 1] == LINE_FEED) {
+                    queue.add(resp.toString());
+                    resp.reset();
+                }
+            }
+        } catch (IOException e) {
+            throw e;
+        }
+    }
+
     private void getObjectStream(InputStream in, Consumer<byte[]> processor, Consumer<IOException> error) {
         byte LINE_FEED = (byte)10;
 
@@ -842,7 +893,7 @@ public class IPFS {
         HttpURLConnection conn = (HttpURLConnection) target.openConnection();
         conn.setRequestMethod("GET");
         conn.setRequestProperty("Content-Type", "application/json");
-        conn.setReadTimeout(IPFS.httpTimeout);
+        //conn.setReadTimeout(IPFS.httpTimeout);
         return conn.getInputStream();
     }
 
