@@ -406,6 +406,11 @@ public class IPFS {
             Map res = (Map) retrieveAndParse("name/resolve?arg=" + hash);
             return (String)res.get("Path");
         }
+
+        public Optional<String> resolve(Multihash hash, int timeout) throws IOException {
+            Map res = (Map) retrieveAndParse("name/resolve?arg=" + hash + "&dhtt=" + timeout + "s");
+            return Optional.ofNullable((String)res.get("Path"));
+        }
     }
 
     public class DHT {
