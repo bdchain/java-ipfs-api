@@ -135,6 +135,10 @@ public class IPFS {
         return retrieveMap("resolve?arg=/" + scheme+"/"+hash +"&r="+recursive);
     }
 
+    public Map resolve(String scheme, String path, boolean recursive) throws IOException {
+        return retrieveMap("resolve?arg=/" + scheme+"/"+path +"&r="+recursive);
+    }
+
 
     public String dns(String domain) throws IOException {
         Map res = retrieveMap("dns?arg=" + domain);
@@ -426,7 +430,11 @@ public class IPFS {
             return (List)retrieveAndParse("dht/findprovs?arg=" + hash);
         }
 
-        public List<String> findprovsListTimeout(Multihash id, int maxPeers, int timeout) throws  IOException {
+        public List<String> findprovsListTimeout(Multihash id, int maxPeers, int timeout) throws IOException {
+            return findprovsListTimeout(id, maxPeers, timeout, Executors.newSingleThreadExecutor());
+        }
+
+        public List<String> findprovsListTimeout(Multihash id, int maxPeers, int timeout, ExecutorService executor) throws  IOException {
             BlockingQueue<String> queue = new LinkedBlockingQueue<>();
             Runnable task = new Runnable() {
                 @Override
@@ -441,8 +449,8 @@ public class IPFS {
                     }
                 }
             };
-            ExecutorService executorService = Executors.newSingleThreadExecutor();
-            executorService.execute(task);
+
+            executor.execute(task);
 
             List<String> ret;
             try {
@@ -511,6 +519,10 @@ public class IPFS {
         }
 
         public List<String> findpeerListTimeout(Multihash id, int timeout) throws IOException {
+            return findpeerListTimeout(id, timeout, Executors.newSingleThreadExecutor());
+        }
+
+        public List<String> findpeerListTimeout(Multihash id, int timeout, ExecutorService executor) throws IOException {
             BlockingQueue<String> queue = new LinkedBlockingQueue<>();
             Runnable task = new Runnable() {
                 @Override
@@ -525,8 +537,8 @@ public class IPFS {
                     }
                 }
             };
-            ExecutorService executorService = Executors.newSingleThreadExecutor();
-            executorService.execute(task);
+
+            executor.execute(task);
 
             List<String> ret = Collections.emptyList();
             try {
